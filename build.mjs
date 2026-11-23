@@ -3,11 +3,12 @@
 // Output:
 //   dist/chrome/   + dist/local-tts-reader-chrome-<version>.zip   (Chrome Web Store)
 //   dist/firefox/  + dist/local-tts-reader-firefox-<version>.zip  (addons.mozilla.org)
+// Zips from earlier versions are deleted on every build.
 //
 // manifest.json in the project root is the Chrome manifest (so "Load unpacked" works on
 // the root folder). The Firefox manifest is derived from it here.
 
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -42,11 +43,18 @@ function zip(dir, zipPath) {
   else execFileSync(tar, ["-r", join(process.cwd(), zipPath), ...entries], { cwd: dir });
 }
 
+// Remove zips from earlier builds so only the current version is left to upload.
+mkdirSync("dist", { recursive: true });
+for (const f of readdirSync("dist")) {
+  if (/^local-tts-reader-.*\.zip$/.test(f)) {
+    rmSync(join("dist", f));
+    console.log(`removed old ${f}`);
+  }
+}
+
 for (const [name, manifest] of [["chrome", base], ["firefox", firefoxManifest(base)]]) {
   const dir = join("dist", name);
-  // zips of older versions stay in dist/; only the unpacked folder and this version's zip are rebuilt
   rmSync(dir, { recursive: true, force: true });
-  rmSync(join("dist", `local-tts-reader-${name}-${base.version}.zip`), { force: true });
   mkdirSync(dir, { recursive: true });
   for (const f of FILES) cpSync(f, join(dir, f), { recursive: true });
   writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
