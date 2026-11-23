@@ -21,6 +21,7 @@ All speech uses **local voices only**. No cloud TTS, no account, and nothing you
 - **Pause / Resume / Stop.** Stop keeps the list, so you can continue from any paragraph.
 - **A separate list per tab.** Tabs that read at the same time take turns on the single speech channel.
 - **Automatic language detection** for each message, done offline. Mixed text such as an English username followed by a Hebrew message is read with a matching voice for each part.
+- **Skip menus & navigation** (on by default): Read all leaves out menus, navigation bars and link lists. Turn it off if something you want is skipped.
 - **Settings** behind the ⚙ button: default voice, speed, volume, backlog.
 - A **⚠** button tells you when a language has no installed voice and how to add one on Windows, macOS, Linux, Android and ChromeOS.
 

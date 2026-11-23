@@ -1,5 +1,5 @@
 const ext = globalThis.browser || globalThis.chrome;
-const DEFAULTS = { voiceName: "", rate: 1, volume: 1, liveOnlyNew: true, backlog: 5, autoLang: true };
+const DEFAULTS = { voiceName: "", rate: 1, volume: 1, liveOnlyNew: true, backlog: 5, autoLang: true, skipNav: true };
 const $ = (id) => document.getElementById(id);
 
 // Local voices as [{ name, lang }]. Chrome: chrome.tts. Firefox: speechSynthesis.
@@ -59,6 +59,7 @@ async function loadSettings() {
   const s = await ext.storage.sync.get(DEFAULTS);
   $("liveOnlyNew").checked = s.liveOnlyNew;
   $("autoLang").checked = s.autoLang;
+  $("skipNav").checked = s.skipNav;
   for (const [id, cfg] of Object.entries(SLIDERS)) {
     const v = cfg.toUi(s[cfg.key]);
     $(id).value = v;
@@ -87,6 +88,7 @@ async function loadSettings() {
 $("voice").addEventListener("change", (e) => ext.storage.sync.set({ voiceName: e.target.value }));
 $("liveOnlyNew").addEventListener("change", (e) => ext.storage.sync.set({ liveOnlyNew: e.target.checked }));
 $("autoLang").addEventListener("change", (e) => ext.storage.sync.set({ autoLang: e.target.checked }));
+$("skipNav").addEventListener("change", (e) => ext.storage.sync.set({ skipNav: e.target.checked }));
 
 // ---------- views: main / settings (gear) ----------
 

@@ -11,7 +11,7 @@
 const ext = globalThis.browser || globalThis.chrome;
 const HAS_EXT_TTS = !!(ext.tts && ext.tts.speak);
 
-const DEFAULTS = { voiceName: "", rate: 1, volume: 1, liveOnlyNew: true, backlog: 5, autoLang: true };
+const DEFAULTS = { voiceName: "", rate: 1, volume: 1, liveOnlyNew: true, backlog: 5, autoLang: true, skipNav: true };
 const CHUNK_MAX = 220;
 
 // ---------- settings ----------
@@ -445,13 +445,69 @@ async function getSelectionText(tabId) {
   return hit || "";
 }
 
+// Runs inside the page. With skipNav, menus / navigation / link lists are left out:
+// they are hidden for a moment (same task, so nothing flickers) while innerText is read.
+function extractPageText(skipNav) {
+  const root =
+    document.querySelector("article") || document.querySelector("main, [role=main]") || document.body;
+  if (!root) return "";
+  if (!skipNav) return root.innerText;
+
+  const skip = new Set(
+    root.querySelectorAll(
+      "nav, aside, form, button, select, [role=navigation], [role=banner], [role=contentinfo]," +
+        " [role=complementary], [role=menu], [role=menubar], [role=toolbar], [role=search]," +
+        " [role=tablist], [aria-hidden=true]"
+    )
+  );
+  // Page header/footer bars - but not an article's own header (title, byline).
+  for (const el of root.querySelectorAll("header, footer")) if (!el.closest("article")) skip.add(el);
+  // Class / id names that mark site chrome.
+  const NAMEY = /(^|[\s_-])(nav|navbar|navigation|menu|menubar|sidebar|breadcrumbs?|toolbar|tabs|cookie|share|social|jump-link|skip-link)([\s_-]|$)/i;
+  for (const el of root.querySelectorAll("[class], [id]")) {
+    const name = (typeof el.className === "string" ? el.className : "") + " " + el.id;
+    if (NAMEY.test(name)) skip.add(el);
+  }
+  // Blocks that are almost only links (menus, link lists). Only letters/digits are counted,
+  // so separators like "·" or "|" between links don't hide a link list.
+  const letters = (s) => (s || "").replace(/[^\p{L}\p{N}]/gu, "").length;
+  for (const el of root.querySelectorAll("ul, ol, table, div")) {
+    if (skip.has(el)) continue;
+    const total = letters(el.textContent);
+    if (!total || total > 1500) continue;
+    const links = el.querySelectorAll("a");
+    if (links.length < 3) continue;
+    let linkLen = 0;
+    for (const a of links) linkLen += letters(a.textContent);
+    if (linkLen / total > 0.75) skip.add(el);
+  }
+
+  // Hide with a temporary marker attribute + stylesheet (the page's own style attributes
+  // are never touched), read the text, then remove both.
+  const MARK = "data-local-tts-skip";
+  const marked = [];
+  for (const el of skip) {
+    if (el === root || el.contains(root)) continue;
+    el.setAttribute(MARK, "");
+    marked.push(el);
+  }
+  const sheet = document.createElement("style");
+  sheet.textContent = `[${MARK}] { display: none !important; }`;
+  (document.head || document.documentElement).append(sheet);
+  try {
+    return root.innerText;
+  } finally {
+    sheet.remove();
+    for (const el of marked) el.removeAttribute(MARK);
+  }
+}
+
 async function getPageText(tabId) {
+  const { skipNav } = await getSettings();
   const [res] = await ext.scripting.executeScript({
     target: { tabId, frameIds: [0] },
-    func: () => {
-      const root = document.querySelector("article") || document.querySelector("main") || document.body;
-      return root ? root.innerText : "";
-    },
+    func: extractPageText,
+    args: [skipNav],
   });
   return res?.result || "";
 }

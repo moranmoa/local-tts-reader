@@ -109,6 +109,7 @@ kbd {
   text-align: start;
 }
 .now-item:hover { background: var(--btn); }
+.now-option { margin-top: 8px; }
 .now-item.played { color: var(--muted); }
 .now-item.current { background: var(--accent-soft); border-left-color: var(--accent); color: var(--fg); }
 
