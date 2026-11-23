@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Local TTS Reader",
+  "version": "0.4.1",
+  "description": "Read selected text, the whole page, or a live section (e.g. Twitch / YouTube chat) aloud using local voices only.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": ["tts", "storage", "scripting", "contextMenus", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Local TTS Reader",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+  "commands": {
+    "read-selection": {
+      "suggested_key": { "default": "Alt+Shift+R" },
+      "description": "Read selected text"
+    },
+    "stop-reading": {
+      "suggested_key": { "default": "Alt+Shift+X" },
+      "description": "Stop reading"
+    }
+  }
+}
