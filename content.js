@@ -94,7 +94,7 @@
       Object.assign(box.style, { display: "block", left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" });
       label.textContent = state.touch
         ? `${describe(el)}  —  use the buttons below`
-        : `${describe(el)}  —  click: read · ↑ parent · ↓ child · Esc: cancel`;
+        : `${describe(el)}  —  ↑ bigger area · ↓ smaller · click: read · Esc: cancel`;
       label.style.display = "block";
       label.style.left = Math.max(0, r.left) + "px";
       label.style.top = (r.top > 24 ? r.top - 22 : Math.min(r.bottom + 2, innerHeight - 22)) + "px";

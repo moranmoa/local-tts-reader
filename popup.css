@@ -55,6 +55,15 @@ button.danger:hover { border-color: var(--danger); color: var(--danger); }
 .slider-row label { color: var(--muted); }
 .slider-row output { text-align: right; font-variant-numeric: tabular-nums; }
 .hint { color: var(--muted); font-size: 11px; margin-top: -4px; }
+.section-hint { margin: -2px 2px 2px; }
+kbd {
+  font: 10px/1 system-ui, sans-serif;
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--btn);
+}
+.touch-only { display: none; }
 select, input[type="range"] { width: 100%; margin: 0; }
 input[type="range"] { accent-color: var(--accent); }
 select {
@@ -82,4 +91,6 @@ footer { margin-top: 12px; color: var(--muted); font-size: 11px; }
   button { padding: 12px; }
   .slider-row { grid-template-columns: 70px 1fr 52px; }
   footer { display: none; } /* keyboard shortcuts don't exist on Android */
+  .desktop-only { display: none; }
+  .touch-only { display: block; }
 }
