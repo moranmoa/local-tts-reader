@@ -46,6 +46,7 @@ h1 { font-size: 15px; margin: 0; }
   border: 1px solid #f0b429;
   background: rgba(240, 180, 41, 0.12);
   font-size: 12px;
+  white-space: pre-line; /* help text has line breaks */
 }
 
 /* buttons */

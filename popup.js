@@ -76,6 +76,8 @@ async function loadSettings() {
   if (!local.length) {
     sel.append(new Option("No local voices found", ""));
     sel.disabled = true;
+    warn.noVoices = true; // show the ⚠ button with install help
+    updateWarning();
     return;
   }
   for (const v of local) sel.append(new Option(`${v.name} (${v.lang || "?"})`, v.name));
@@ -136,26 +138,56 @@ async function jump(index) {
   refreshState();
 }
 
-// ---------- missing voice hint ----------
+// ---------- voice warnings (⚠ button; the message opens only on click) ----------
+// Two cases: no local voices at all, or a detected language without an installed voice.
+// The help text depends on the operating system (and, on Linux, on the browser).
 
-const IS_ANDROID = /Android/i.test(navigator.userAgent);
+const IS_CHROME = !!(ext.tts && ext.tts.getVoices);
+let platform = /Android/i.test(navigator.userAgent) ? "android" : "win";
+const warn = { noVoices: false, missing: null };
 
-// A missing voice shows a ⚠ button; the message itself opens only when the button is clicked.
-function showVoiceWarning(missing) {
+function voiceHelp() {
+  switch (platform) {
+    case "android":
+      return "Add one in Android Settings → Text-to-speech (install the language in your TTS engine), then restart Firefox.";
+    case "mac":
+      return "Add one in System Settings → Accessibility → Spoken Content → System voice → Manage Voices, then restart the browser.";
+    case "cros":
+      return "Add one in ChromeOS Settings → Accessibility → Text-to-speech → Speech engine / voices.";
+    case "linux":
+      return [
+        "Linux voices come from speech-dispatcher. Install it with a voice engine, e.g.:",
+        "sudo apt install speech-dispatcher espeak-ng",
+        "For more natural voices add RHVoice or Piper, then restart the browser.",
+        IS_CHROME ? "Chrome on Linux: start it with --enable-speech-dispatcher, otherwise it shows no local voices." : "",
+      ].filter(Boolean).join("\n");
+    default:
+      return "Add one in Windows Settings → Time & language → Speech → Add voices, then restart the browser.";
+  }
+}
+
+function updateWarning() {
   const el = $("voiceWarning");
   const btn = $("warnBtn");
-  if (!missing || Date.now() - missing.at > 30 * 60 * 1000) {
+  const missing = warn.missing && Date.now() - warn.missing.at < 30 * 60 * 1000 ? warn.missing : null;
+
+  let title = "";
+  if (warn.noVoices) {
+    title = "No local voices found";
+  } else if (missing) {
+    let name = missing.lang;
+    try { name = new Intl.DisplayNames(["en"], { type: "language" }).of(missing.lang) || name; } catch (_) {}
+    title = `No installed voice for ${name}`;
+  }
+
+  if (!title) {
     btn.hidden = true;
     el.hidden = true;
     btn.setAttribute("aria-expanded", "false");
     return;
   }
-  let name = missing.lang;
-  try { name = new Intl.DisplayNames(["en"], { type: "language" }).of(missing.lang) || name; } catch (_) {}
-  el.textContent = IS_ANDROID
-    ? `No installed voice for ${name}. Add one in Android Settings → Text-to-speech, then restart Firefox.`
-    : `No installed voice for ${name}. Add one in Windows Settings → Time & language → Speech → Add voices, then restart the browser.`;
-  btn.title = `No installed voice for ${name} – click for details`;
+  el.textContent = `${title}.\n${voiceHelp()}`;
+  btn.title = `${title} – click for details`;
   btn.hidden = false;
 }
 
@@ -165,9 +197,13 @@ $("warnBtn").addEventListener("click", () => {
   $("warnBtn").setAttribute("aria-expanded", String(!el.hidden));
 });
 
-ext.storage.local.get({ missingVoice: null }).then((s) => showVoiceWarning(s.missingVoice));
+(ext.runtime.getPlatformInfo?.() || Promise.resolve(null))
+  .then((info) => { if (info?.os) platform = info.os; updateWarning(); })
+  .catch(() => {});
+
+ext.storage.local.get({ missingVoice: null }).then((s) => { warn.missing = s.missingVoice; updateWarning(); });
 ext.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.missingVoice) showVoiceWarning(changes.missingVoice.newValue);
+  if (area === "local" && changes.missingVoice) { warn.missing = changes.missingVoice.newValue; updateWarning(); }
 });
 
 // ---------- player state -> UI ----------
