@@ -34,6 +34,9 @@ body {
 /* header */
 .title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 h1 { font-size: 15px; margin: 0; }
+.title-actions { display: flex; gap: 6px; }
+.warn-btn { color: #f0b429; border-color: #f0b429; }
+.warn-btn:hover:not(:disabled), .warn-btn[aria-expanded="true"] { background: rgba(240, 180, 41, 0.15); border-color: #f0b429; }
 .status { color: var(--muted); min-height: 18px; margin: 4px 0 10px; }
 .status.error { color: var(--danger); }
 .warning {

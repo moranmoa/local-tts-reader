@@ -140,16 +140,30 @@ async function jump(index) {
 
 const IS_ANDROID = /Android/i.test(navigator.userAgent);
 
+// A missing voice shows a ⚠ button; the message itself opens only when the button is clicked.
 function showVoiceWarning(missing) {
   const el = $("voiceWarning");
-  if (!missing || Date.now() - missing.at > 30 * 60 * 1000) { el.hidden = true; return; }
+  const btn = $("warnBtn");
+  if (!missing || Date.now() - missing.at > 30 * 60 * 1000) {
+    btn.hidden = true;
+    el.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+    return;
+  }
   let name = missing.lang;
   try { name = new Intl.DisplayNames(["en"], { type: "language" }).of(missing.lang) || name; } catch (_) {}
   el.textContent = IS_ANDROID
     ? `No installed voice for ${name}. Add one in Android Settings → Text-to-speech, then restart Firefox.`
     : `No installed voice for ${name}. Add one in Windows Settings → Time & language → Speech → Add voices, then restart the browser.`;
-  el.hidden = false;
+  btn.title = `No installed voice for ${name} – click for details`;
+  btn.hidden = false;
 }
+
+$("warnBtn").addEventListener("click", () => {
+  const el = $("voiceWarning");
+  el.hidden = !el.hidden;
+  $("warnBtn").setAttribute("aria-expanded", String(!el.hidden));
+});
 
 ext.storage.local.get({ missingVoice: null }).then((s) => showVoiceWarning(s.missingVoice));
 ext.storage.onChanged.addListener((changes, area) => {

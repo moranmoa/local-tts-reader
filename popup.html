@@ -9,7 +9,10 @@
   <header>
     <div class="title-row">
       <h1>Local TTS Reader</h1>
-      <button id="gear" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
+      <div class="title-actions">
+        <button id="warnBtn" class="icon-btn warn-btn" title="A voice is missing – click for details" aria-label="Missing voice" aria-expanded="false" hidden>⚠</button>
+        <button id="gear" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
+      </div>
     </div>
     <div id="status" class="status">Checking for selected text…</div>
     <div id="voiceWarning" class="warning" hidden></div>
