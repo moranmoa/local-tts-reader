@@ -206,153 +206,204 @@ const output = {
   },
 };
 
-// ---------- player ----------
-// status: "idle" (nothing loaded) | "playing" | "paused" | "stopped" | "done" (reached the end)
+// ---------- players: one per tab, sharing one speech channel ----------
+// Each tab has its own list (paragraphs or chat messages), position and status.
+// The browser can only speak one thing at a time, so tabs that are playing take turns:
+// one item per turn, round-robin. A user action in a tab (read, jump, resume) gives that
+// tab the turn right away; an item cut off that way is read again on its tab's next turn.
+// status: "idle" | "playing" (wants turns) | "paused" | "stopped" | "done" (reached the end)
 
 const MAX_LIVE_ITEMS = 300;
 
-const player = {
-  id: 0,          // changes whenever a new list is loaded (popup re-renders the list)
-  items: [],
-  index: -1,
-  status: "idle",
-  live: false,    // chat section: new messages are appended
-  tabId: null,
-  token: 0,       // bumped on every start/stop so late "ended" events are ignored
-};
+const players = new Map();               // tabId -> { tabId, id, items, index, status, live }
+const audio = { tabId: null, token: 0 }; // the tab whose item is being spoken now
+let lastServed = null;                   // for round-robin
+let listId = 0;                          // every new list gets a new id (popup re-renders)
 
-function saveState() {
-  const { id, items, index, status, live, tabId } = player;
-  ext.storage.session.set({ player: { id, items, index, status, live, tabId } }).catch(() => {});
+function getPlayer(tabId) {
+  let p = players.get(tabId);
+  if (!p) {
+    p = { tabId, id: ++listId, items: [], index: -1, status: "idle", live: false };
+    players.set(tabId, p);
+  }
+  return p;
 }
 
-// The background can be unloaded between events: restore the list (speech itself is gone).
+function saveState() {
+  const list = [...players.values()].map(({ tabId, id, items, index, status, live }) => ({ tabId, id, items, index, status, live }));
+  ext.storage.session.set({ players: list, listId }).catch(() => {});
+}
+
+// The background can be unloaded between events: restore the lists (speech itself is gone).
 const restored = (async () => {
   try {
-    const { player: saved } = await ext.storage.session.get("player");
-    if (saved) {
-      Object.assign(player, saved);
-      if (player.status === "playing") player.status = "paused";
+    const s = await ext.storage.session.get(["players", "listId"]);
+    for (const p of s.players || []) {
+      if (p.status === "playing") p.status = "paused";
+      players.set(p.tabId, p);
     }
+    listId = Math.max(listId, s.listId || 0);
   } catch (_) {}
 })();
 
-async function playCurrent() {
-  const item = player.items[player.index];
-  if (!item) return;
-  const token = ++player.token;
-  player.status = "playing";
+// Silence whatever is speaking. Its tab keeps its position, so the item is read again later.
+function interrupt() {
+  if (audio.tabId == null) return;
+  const tabId = audio.tabId;
+  audio.tabId = null;
+  audio.token++;
+  output.stop(tabId);
+}
+
+// Next tab that wants to speak: `prefer` first, otherwise round-robin by tab id.
+function nextTab(prefer) {
+  const ready = [...players.values()]
+    .filter((p) => p.status === "playing" && p.items[p.index])
+    .map((p) => p.tabId)
+    .sort((a, b) => a - b);
+  if (!ready.length) return null;
+  if (prefer != null && ready.includes(prefer)) return prefer;
+  return ready.find((id) => lastServed == null || id > lastServed) ?? ready[0];
+}
+
+async function schedule(prefer) {
+  if (audio.tabId != null) return; // channel busy; we'll be called again when it ends
+  const tabId = nextTab(prefer);
   saveState();
+  if (tabId == null) return;
+  const p = players.get(tabId);
+  const item = p.items[p.index];
+  const token = ++audio.token;
+  audio.tabId = tabId;
+  lastServed = tabId;
   const settings = await getSettings();
-  if (token !== player.token) return; // something else happened meanwhile
-  const done = () => { if (token === player.token) onItemEnd(); };
+  if (token !== audio.token) return; // interrupted meanwhile
+  const done = () => queued(() => onItemEnd(tabId, token));
   try {
     if (HAS_EXT_TTS) await output.speakChrome(item, settings, done);
-    else await output.speakFirefox(item, settings, token, player.tabId);
+    else await output.speakFirefox(item, settings, token, tabId);
   } catch (_) {
-    if (token === player.token) { player.status = "stopped"; saveState(); }
+    if (token === audio.token) {
+      audio.tabId = null;
+      p.status = "stopped";
+      schedule();
+    }
   }
 }
 
-function onItemEnd() {
-  if (player.index < player.items.length - 1) {
-    player.index++;
-    playCurrent();
-  } else {
-    player.status = "done"; // live chat: the next message will continue from here
-    player.token++;
-    saveState();
+function onItemEnd(tabId, token) {
+  if (token !== audio.token || audio.tabId !== tabId) return; // stale event
+  audio.tabId = null;
+  const p = players.get(tabId);
+  if (p) {
+    if (p.index < p.items.length - 1) p.index++;
+    else p.status = "done"; // live chat: the next message continues from here
   }
+  schedule();
 }
 
-function silence() {
-  player.token++;
-  output.stop(player.tabId);
+// A user action in this tab: it gets the channel now.
+function takeTurn(tabId) {
+  interrupt();
+  schedule(tabId);
+}
+
+function trimBacklog(p, backlog) {
+  // waiting = items after the current one (the current one is being read or already was)
+  const firstWaiting = p.index + 1;
+  const waiting = p.items.length - firstWaiting;
+  if (waiting > backlog) p.items.splice(firstWaiting, waiting - backlog);
 }
 
 const playerApi = {
-  async load(items, tabId, live = false) {
+  // interrupt = true for user actions (Read all, selection, picking a section).
+  async load(tabId, items, live = false, interrupt = true) {
     if (!items.length) return { ok: false, error: "No text found." };
-    silence();
-    player.id++;
-    player.items = items;
-    player.index = 0;
-    player.live = live;
-    player.tabId = tabId;
+    const p = getPlayer(tabId);
+    Object.assign(p, { id: ++listId, items, index: 0, live, status: "playing" });
     if (!HAS_EXT_TTS && tabId != null) await injectContent(tabId);
-    playCurrent();
+    if (interrupt) takeTurn(tabId);
+    else schedule();
     return { ok: true };
   },
 
   // Chat messages: append; keep only the newest `backlog` messages that are still waiting.
-  async addLive(items, tabId) {
+  async addLive(tabId, items) {
     if (!items.length) return { ok: true };
     const { backlog } = await getSettings();
-    if (!player.live || player.tabId !== tabId || player.status === "idle" || player.status === "stopped") {
-      const r = await playerApi.load(items, tabId, true);
-      trimBacklog(backlog);
+    const p = getPlayer(tabId);
+    if (!p.live || p.status === "idle" || p.status === "stopped") {
+      const r = await playerApi.load(tabId, items, true, false); // a chat message waits for its turn
+      trimBacklog(p, backlog);
       return r;
     }
-    player.items.push(...items);
-    trimBacklog(backlog);
-    if (player.items.length > MAX_LIVE_ITEMS) {
-      const drop = player.items.length - MAX_LIVE_ITEMS;
-      player.items.splice(0, drop);
-      player.index = Math.max(0, player.index - drop);
+    p.items.push(...items);
+    trimBacklog(p, backlog);
+    if (p.items.length > MAX_LIVE_ITEMS) {
+      const drop = p.items.length - MAX_LIVE_ITEMS;
+      p.items.splice(0, drop);
+      p.index = Math.max(0, p.index - drop);
     }
-    if (player.status === "done") {
-      player.index++;
-      playCurrent();
-    } else {
-      saveState();
+    if (p.status === "done") {
+      p.index++;
+      p.status = "playing";
     }
+    schedule(); // no interrupt: chat messages wait for their turn
     return { ok: true };
   },
 
-  jump(index) {
-    if (!player.items.length) return;
-    player.index = Math.max(0, Math.min(player.items.length - 1, index));
-    silence();
-    playCurrent();
+  jump(tabId, index) {
+    const p = players.get(tabId);
+    if (!p?.items.length) return;
+    p.index = Math.max(0, Math.min(p.items.length - 1, index));
+    p.status = "playing";
+    takeTurn(tabId);
   },
 
-  pause() {
-    if (player.status !== "playing") return;
-    silence();
-    player.status = "paused";
-    saveState();
+  pause(tabId) {
+    const p = players.get(tabId);
+    if (p?.status !== "playing") return;
+    p.status = "paused";
+    if (audio.tabId === tabId) interrupt();
+    schedule(); // other tabs keep going
   },
 
-  resume() {
-    if (!player.items.length) return;
-    if (player.status === "done") player.index = Math.min(player.index, player.items.length - 1);
-    silence();
-    playCurrent(); // restarts the current paragraph
+  resume(tabId) {
+    const p = players.get(tabId);
+    if (!p?.items.length) return;
+    p.index = Math.min(Math.max(p.index, 0), p.items.length - 1);
+    p.status = "playing";
+    takeTurn(tabId); // restarts the current paragraph
   },
 
-  stop() {
-    silence();
-    if (player.items.length) player.status = "stopped";
-    saveState();
+  stop(tabId) {
+    const p = players.get(tabId);
+    if (!p) return;
+    if (p.items.length) p.status = "stopped";
+    if (audio.tabId === tabId) interrupt();
+    schedule();
   },
 
-  state() {
+  remove(tabId) {
+    if (audio.tabId === tabId) interrupt();
+    players.delete(tabId);
+    schedule();
+  },
+
+  state(tabId) {
+    const p = players.get(tabId) || { id: 0, items: [], index: -1, status: "idle", live: false };
+    const others = [...players.values()].filter((o) => o.tabId !== tabId && o.status === "playing").length;
     return {
-      id: player.id,
-      status: player.status,
-      index: player.index,
-      live: player.live,
-      texts: player.items.map((i) => i.text),
+      id: p.id,
+      status: p.status,
+      index: p.index,
+      live: p.live,
+      texts: p.items.map((i) => i.text),
+      speakingHere: audio.tabId === tabId,
+      othersPlaying: others,
     };
   },
 };
-
-function trimBacklog(backlog) {
-  // waiting = items after the one being read (when done, the current one was already read)
-  const firstWaiting = player.index + 1;
-  const waiting = player.items.length - firstWaiting;
-  if (waiting > backlog) player.items.splice(firstWaiting, waiting - backlog);
-}
 
 // Serialize player operations so chat messages keep their order (item building is async).
 let chain = Promise.resolve();
@@ -364,7 +415,7 @@ function queued(fn) {
 
 async function readText(text, tabId) {
   const { autoLang } = await getSettings();
-  return playerApi.load(await makeItems(text, autoLang, true), tabId);
+  return playerApi.load(tabId, await makeItems(text, autoLang, true));
 }
 
 // ---------- page access ----------
@@ -406,7 +457,7 @@ async function getPageText(tabId) {
 }
 
 async function stopAll(tabId) {
-  playerApi.stop();
+  playerApi.stop(tabId);
   if (tabId != null) {
     setWatching(tabId, false);
     ext.tabs.sendMessage(tabId, { type: "stopWatch" }).catch(() => {});
@@ -431,12 +482,13 @@ async function isWatching(tabId) {
 ext.tabs.onUpdated.addListener((tabId, info) => {
   if (info.status !== "loading") return;
   setWatching(tabId, false).catch(() => {}); // a reload or navigation removes the watched element
-  // Firefox speaks inside the page, so leaving the page ends the speech.
-  if (!HAS_EXT_TTS && tabId === player.tabId && player.status === "playing") {
-    queued(() => { player.token++; player.status = "stopped"; saveState(); });
-  }
+  // Firefox speaks inside the page, so leaving the page ends that tab's reading.
+  if (!HAS_EXT_TTS && players.get(tabId)?.status === "playing") queued(() => playerApi.stop(tabId));
 });
-ext.tabs.onRemoved.addListener((tabId) => setWatching(tabId, false).catch(() => {}));
+ext.tabs.onRemoved.addListener((tabId) => {
+  setWatching(tabId, false).catch(() => {});
+  queued(() => playerApi.remove(tabId));
+});
 
 async function activeTabId() {
   const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
@@ -459,7 +511,7 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return sendResponse(await queued(() => readText(text, msg.tabId)));
         }
         case "startPick":
-          await queued(() => playerApi.stop());
+          await queued(() => playerApi.stop(msg.tabId));
           await setWatching(msg.tabId, false); // starting a new pick stops the old watch
           await injectContent(msg.tabId);
           await ext.tabs.sendMessage(msg.tabId, { type: "startPick", liveOnlyNew: msg.liveOnlyNew });
@@ -475,31 +527,31 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return sendResponse(await queued(async () => {
             if (msg.mode === "replace") {
               // whole section once, then new messages are appended (live list)
-              return playerApi.load(await makeItems(msg.texts.join("\n"), autoLang, true), tabId, true);
+              return playerApi.load(tabId, await makeItems(msg.texts.join("\n"), autoLang, true), true);
             }
             const items = [];
             for (const t of msg.texts) items.push(...(await makeItems(t, autoLang, false)));
-            return playerApi.addLive(items, tabId);
+            return playerApi.addLive(tabId, items);
           }));
         }
         case "ttsItemEnd": // Firefox: the page finished speaking an item
-          await queued(() => { if (msg.token === player.token) onItemEnd(); });
+          await queued(() => onItemEnd(sender.tab?.id, msg.token));
           return sendResponse({ ok: true });
         case "getState":
           await restored;
           return sendResponse({
             ok: true,
-            ...playerApi.state(),
+            ...playerApi.state(msg.tabId),
             watching: msg.tabId != null && (await isWatching(msg.tabId)),
           });
         case "pause":
-          await queued(() => playerApi.pause());
+          await queued(() => playerApi.pause(msg.tabId));
           return sendResponse({ ok: true });
         case "resume":
-          await queued(() => playerApi.resume());
+          await queued(() => playerApi.resume(msg.tabId));
           return sendResponse({ ok: true });
         case "jump":
-          await queued(() => playerApi.jump(msg.index));
+          await queued(() => playerApi.jump(msg.tabId, msg.index));
           return sendResponse({ ok: true });
         case "stop":
           await queued(() => stopAll(msg.tabId));

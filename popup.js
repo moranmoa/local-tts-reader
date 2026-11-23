@@ -123,7 +123,7 @@ $("stop").addEventListener("click", async () => {
 });
 
 $("pause").addEventListener("click", async () => {
-  await send({ type: state.status === "playing" ? "pause" : "resume" });
+  await send({ type: state.status === "playing" ? "pause" : "resume", tabId: await getTabId() });
   refreshState();
 });
 
@@ -132,7 +132,7 @@ $("next").addEventListener("click", () => jump(state.index + 1));
 
 async function jump(index) {
   if (index < 0 || index >= state.texts.length) return;
-  await send({ type: "jump", index });
+  await send({ type: "jump", index, tabId: await getTabId() });
   refreshState();
 }
 
@@ -196,7 +196,9 @@ function statusText() {
   const n = state.texts.length;
   const where = state.live ? "chat" : `paragraph ${state.index + 1} of ${n}`;
   switch (state.status) {
-    case "playing": return state.live ? "Reading chat…" : `Reading ${where}…`;
+    case "playing":
+      if (!state.speakingHere && state.othersPlaying) return "Waiting for its turn (another tab is reading)…";
+      return state.live ? "Reading chat…" : `Reading ${where}…`;
     case "paused": return `Paused (${where}).`;
     case "stopped": return "Stopped. Click a paragraph or Resume to continue.";
     case "done": return state.watching ? "Waiting for new chat messages…" : "Finished.";

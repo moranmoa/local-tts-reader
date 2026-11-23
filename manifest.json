@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Local TTS Reader",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Read selected text, the whole page, or a live section (e.g. Twitch / YouTube chat) aloud using local voices only.",
   "icons": {
     "16": "icons/icon-16.png",
