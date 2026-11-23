@@ -371,6 +371,9 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "pickFrame": // a frame started highlighting: tell the others to hide their picker UI
           ext.tabs.sendMessage(sender.tab.id, { type: "pickFrame", token: msg.token }).catch(() => {});
           return sendResponse({ ok: true });
+        case "pickKey": // arrow/Enter/Escape pressed in a frame that doesn't hold the highlight
+          ext.tabs.sendMessage(sender.tab.id, { type: "pickKey", key: msg.key }).catch(() => {});
+          return sendResponse({ ok: true });
         case "missingVoice": // from the Firefox speech engine in content.js
           reportMissingVoice(msg.lang);
           return sendResponse({ ok: true });

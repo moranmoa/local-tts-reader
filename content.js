@@ -142,11 +142,23 @@
       if (!state.touch && state.current) choose(state.current); // touch: tap only highlights
     };
     const onTouchStart = (e) => { if (!ours(e)) e.stopPropagation(); }; // keep page scrolling
+    // Apply a picker key in this frame. Returns false if this frame has no highlight.
+    const applyKey = (key) => {
+      if (key === "Escape") { cancelPick(); return true; }
+      if (!state.current) return false;
+      if (key === "ArrowUp") toParent();
+      else if (key === "ArrowDown") toChild();
+      else if (key === "Enter") choose(state.current);
+      return true;
+    };
+    // While picking, these keys never reach the page (e.g. YouTube would change the
+    // player volume). Keyboard focus is often in another frame than the highlight
+    // (YouTube chat is an iframe), so keys are forwarded to the frame that has it.
     const onKey = (e) => {
-      if (e.key === "Escape") { block(e); cancelPick(); }
-      else if (e.key === "ArrowUp" && state.current) { block(e); toParent(); }
-      else if (e.key === "ArrowDown" && state.history.length) { block(e); toChild(); }
-      else if (e.key === "Enter" && state.current) { block(e); choose(state.current); }
+      if (!PICK_KEYS.includes(e.key)) return;
+      block(e);
+      if (e.key === "Escape") send({ type: "pickKey", key: "Escape" }); // cancel in every frame
+      if (!applyKey(e.key)) send({ type: "pickKey", key: e.key });
     };
     const onScroll = () => state.current && highlight(state.current);
 
@@ -158,6 +170,7 @@
     ];
     for (const [t, fn] of state.listeners) window.addEventListener(t, fn, { capture: true, passive: false });
     state.hideUi = hideUi;
+    state.applyKey = applyKey;
     picker = state;
   }
 
@@ -173,6 +186,13 @@
   // Another frame started being used: hide this frame's highlight and toolbar.
   function onPickFrame(token) {
     if (picker && token !== frameToken) picker.hideUi();
+  }
+
+  const PICK_KEYS = ["ArrowUp", "ArrowDown", "Enter", "Escape"];
+
+  // A key pressed in another frame: only the frame with a highlight acts on it.
+  function onPickKey(key) {
+    if (picker) picker.applyKey(key);
   }
 
   function choose(el) {
@@ -319,6 +339,7 @@
     if (msg.type === "startPick") { stopWatch(); startPick(msg.liveOnlyNew !== false); }
     else if (msg.type === "cancelPick") cancelPick();
     else if (msg.type === "pickFrame") onPickFrame(msg.token);
+    else if (msg.type === "pickKey") onPickKey(msg.key);
     else if (msg.type === "stopWatch") stopWatch();
     else if (msg.type === "ttsSpeak" && window === window.top) ttsSpeak(msg);
     else if (msg.type === "ttsStop" && window === window.top) ttsStop();
