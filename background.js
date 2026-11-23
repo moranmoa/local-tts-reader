@@ -1,4 +1,6 @@
 // Local TTS Reader - background script (service worker in Chrome, event page in Firefox).
+// All reading goes through one player: a list of paragraphs (items) with a current index,
+// so the popup can show the text, pause, go back/forward and jump to any paragraph.
 // Speech uses LOCAL voices only:
 //   Chrome  -> chrome.tts with voices where remote === false
 //   Firefox -> no chrome.tts, so the page's speechSynthesis (OS voices) is used via content.js
@@ -99,17 +101,21 @@ function getLocalVoices() {
   );
 }
 
-// ---------- text helpers ----------
+// ---------- text -> items ----------
+// An "item" is one paragraph (or a piece of a long one, or one chat message). The popup lists
+// items, and back / forward / click-to-jump move between them.
+// item = { text, parts: [{ text, lang }] } - parts split mixed scripts (English name + Hebrew text).
 
 function cleanText(text) {
   return (text || "")
     .replace(/https?:\/\/\S+/gi, " link ")
-    .replace(/\s+/g, " ")
+    .replace(/[^\S\n]+/g, " ")      // collapse spaces, keep line breaks
+    .replace(/ *\n[\s]*/g, "\n")     // one break between paragraphs
     .trim();
 }
 
-function chunkText(text) {
-  const sentences = text.match(/[^.!?\n]+[.!?]*\s*/g) || [text];
+function chunkParagraph(text) {
+  const sentences = text.match(/[^.!?]+[.!?]*\s*/g) || [text];
   const chunks = [];
   let current = "";
   for (let s of sentences) {
@@ -132,122 +138,233 @@ function chunkText(text) {
   return chunks.map((c) => c.trim()).filter(Boolean);
 }
 
-// text -> [{ text, lang }]
-async function prepare(text, autoLang) {
-  const chunks = chunkText(text);
-  if (!autoLang) return chunks.map((t) => ({ text: t, lang: null }));
-  // Language for Latin-script parts: detect on all Latin text of the message (short parts are unreliable).
-  const latinText = splitByScript(text).filter((r) => r.script === "latin").map((r) => r.text).join(" ");
-  const latinLang = latinText ? await detectCld(latinText.slice(0, 1000)) : null;
-  const hasKana = /[぀-ヿ]/.test(text);
+// Paragraphs stay separate items; long paragraphs are split at sentence ends.
+function chunkText(text) {
+  return text.split("\n").flatMap((p) => (p.trim() ? chunkParagraph(p.trim()) : []));
+}
 
-  const items = [];
-  for (const chunk of chunks) {
-    for (const run of splitByScript(chunk)) {
-      let lang;
-      if (run.script === "latin" || !run.script) lang = (await detectCld(run.text)) || latinLang;
-      else if (run.script === "cjk") lang = hasKana ? "ja" : "zh";
-      else lang = (await detectCld(run.text)) || run.script; // e.g. Cyrillic may be uk, Arabic may be fa
-      items.push({ text: run.text.trim(), lang });
-    }
+async function partsOf(text, ctx) {
+  if (!ctx.autoLang) return [{ text, lang: null }];
+  const parts = [];
+  for (const run of splitByScript(text)) {
+    let lang;
+    if (run.script === "latin" || !run.script) lang = (await detectCld(run.text)) || ctx.latinLang;
+    else if (run.script === "cjk") lang = ctx.hasKana ? "ja" : "zh";
+    else lang = (await detectCld(run.text)) || run.script; // e.g. Cyrillic may be uk, Arabic may be fa
+    parts.push({ text: run.text.trim(), lang });
   }
+  return parts.length ? parts : [{ text, lang: null }];
+}
+
+// chunk = true: page text, split into paragraphs. chunk = false: one chat message = one item.
+async function makeItems(text, autoLang, chunk) {
+  text = cleanText(text);
+  if (!text) return [];
+  const pieces = chunk ? chunkText(text) : [text.replace(/\n+/g, " ")];
+  const ctx = { autoLang, hasKana: /[぀-ヿ]/.test(text), latinLang: null };
+  if (autoLang) {
+    // Language for Latin-script parts, detected on all Latin text (short parts are unreliable).
+    const latinText = splitByScript(text).filter((r) => r.script === "latin").map((r) => r.text).join(" ");
+    ctx.latinLang = latinText ? await detectCld(latinText.slice(0, 1000)) : null;
+  }
+  const items = [];
+  for (const p of pieces) items.push({ text: p, parts: await partsOf(p, ctx) });
   return items;
 }
 
-// ---------- speech (Chrome) ----------
+// ---------- output: speaks one item, calls onDone when it finished ----------
 
-const engine = {
-  pending: 0,      // chunks queued in chrome.tts or speaking
-  generation: 0,   // bumped on stop so late events from old speech are ignored
-  liveQueue: [],   // waiting chat messages (only the newest `backlog` are kept)
+const output = {
+  // Chrome: chrome.tts from here.
+  async speakChrome(item, settings, onDone) {
+    const voices = await getLocalVoices();
+    if (!voices.length) throw new Error("No local voices installed.");
+    item.parts.forEach((part, i) => {
+      const { voice, missing } = resolveVoice(voices, settings.voiceName, part.lang, settings.autoLang);
+      if (missing) reportMissingVoice(missing);
+      const last = i === item.parts.length - 1;
+      ext.tts.speak(part.text, {
+        voiceName: voice.name,
+        rate: settings.rate,
+        volume: settings.volume,
+        enqueue: i > 0, // first part interrupts anything still playing
+        onEvent: (e) => {
+          if (last && (e.type === "end" || e.type === "error")) onDone();
+        },
+      });
+    });
+  },
+
+  // Firefox: the tab's top frame speaks with speechSynthesis and reports back ("ttsItemEnd").
+  async speakFirefox(item, settings, token, tabId) {
+    await ext.tabs.sendMessage(tabId, { type: "ttsItem", parts: item.parts, settings, token }, { frameId: 0 });
+  },
+
+  stop(tabId) {
+    if (HAS_EXT_TTS) ext.tts.stop();
+    else if (tabId != null) ext.tabs.sendMessage(tabId, { type: "ttsStop" }, { frameId: 0 }).catch(() => {});
+  },
 };
 
-function engineStop() {
-  engine.generation++;
-  engine.liveQueue = [];
-  engine.pending = 0;
-  ext.tts.stop();
+// ---------- player ----------
+// status: "idle" (nothing loaded) | "playing" | "paused" | "stopped" | "done" (reached the end)
+
+const MAX_LIVE_ITEMS = 300;
+
+const player = {
+  id: 0,          // changes whenever a new list is loaded (popup re-renders the list)
+  items: [],
+  index: -1,
+  status: "idle",
+  live: false,    // chat section: new messages are appended
+  tabId: null,
+  token: 0,       // bumped on every start/stop so late "ended" events are ignored
+};
+
+function saveState() {
+  const { id, items, index, status, live, tabId } = player;
+  ext.storage.session.set({ player: { id, items, index, status, live, tabId } }).catch(() => {});
 }
 
-async function engineSpeak(items, settings) {
-  const voices = await getLocalVoices();
-  if (!voices.length) throw new Error("No local voices installed.");
-  const gen = engine.generation;
-  for (const { text, lang } of items) {
-    const { voice, missing } = resolveVoice(voices, settings.voiceName, lang, settings.autoLang);
-    if (missing) reportMissingVoice(missing);
-    engine.pending++;
-    ext.tts.speak(text, {
-      voiceName: voice.name,
-      rate: settings.rate,
-      volume: settings.volume,
-      enqueue: true,
-      onEvent: (e) => {
-        if (gen !== engine.generation) return;
-        if (!["end", "interrupted", "cancelled", "error"].includes(e.type)) return;
-        engine.pending = Math.max(0, engine.pending - 1);
-        if (engine.pending === 0) playNextLive();
-      },
-    });
-  }
-}
+// The background can be unloaded between events: restore the list (speech itself is gone).
+const restored = (async () => {
+  try {
+    const { player: saved } = await ext.storage.session.get("player");
+    if (saved) {
+      Object.assign(player, saved);
+      if (player.status === "playing") player.status = "paused";
+    }
+  } catch (_) {}
+})();
 
-function playNextLive() {
-  const next = engine.liveQueue.shift();
-  if (next) engineSpeak(next.items, next.settings).catch(() => {});
-}
-
-// ---------- speak API ----------
-
-/**
- * @param {string[]} texts
- * @param {"replace"|"queue"|"live"} mode
- *   replace - stop whatever is playing and read this
- *   queue   - add after current speech
- *   live    - chat mode: messages wait in a backlog that keeps only the newest N
- *             (N = settings.backlog); older waiting ones are dropped
- * @param {number} tabId - tab the text came from (Firefox speaks inside that tab)
- */
-async function speakNow(texts, mode, tabId) {
-  texts = texts.map(cleanText).filter(Boolean);
-  if (!texts.length) return { ok: false, error: "No text found." };
-
+async function playCurrent() {
+  const item = player.items[player.index];
+  if (!item) return;
+  const token = ++player.token;
+  player.status = "playing";
+  saveState();
   const settings = await getSettings();
-  const prepared = [];
-  for (const t of texts) prepared.push(await prepare(t, settings.autoLang)); // one entry per message
-
-  if (!HAS_EXT_TTS) return speakInTab(tabId, prepared, mode, settings);
-
-  if (mode === "replace") engineStop();
-  if (mode === "live") {
-    for (const items of prepared) engine.liveQueue.push({ items, settings });
-    engine.liveQueue = engine.liveQueue.slice(-settings.backlog);
-    if (engine.pending === 0) playNextLive();
-  } else {
-    await engineSpeak(prepared.flat(), settings);
+  if (token !== player.token) return; // something else happened meanwhile
+  const done = () => { if (token === player.token) onItemEnd(); };
+  try {
+    if (HAS_EXT_TTS) await output.speakChrome(item, settings, done);
+    else await output.speakFirefox(item, settings, token, player.tabId);
+  } catch (_) {
+    if (token === player.token) { player.status = "stopped"; saveState(); }
   }
-  return { ok: true };
 }
 
-// Serialize calls so chat messages keep their order even though detection is async.
+function onItemEnd() {
+  if (player.index < player.items.length - 1) {
+    player.index++;
+    playCurrent();
+  } else {
+    player.status = "done"; // live chat: the next message will continue from here
+    player.token++;
+    saveState();
+  }
+}
+
+function silence() {
+  player.token++;
+  output.stop(player.tabId);
+}
+
+const playerApi = {
+  async load(items, tabId, live = false) {
+    if (!items.length) return { ok: false, error: "No text found." };
+    silence();
+    player.id++;
+    player.items = items;
+    player.index = 0;
+    player.live = live;
+    player.tabId = tabId;
+    if (!HAS_EXT_TTS && tabId != null) await injectContent(tabId);
+    playCurrent();
+    return { ok: true };
+  },
+
+  // Chat messages: append; keep only the newest `backlog` messages that are still waiting.
+  async addLive(items, tabId) {
+    if (!items.length) return { ok: true };
+    const { backlog } = await getSettings();
+    if (!player.live || player.tabId !== tabId || player.status === "idle" || player.status === "stopped") {
+      const r = await playerApi.load(items, tabId, true);
+      trimBacklog(backlog);
+      return r;
+    }
+    player.items.push(...items);
+    trimBacklog(backlog);
+    if (player.items.length > MAX_LIVE_ITEMS) {
+      const drop = player.items.length - MAX_LIVE_ITEMS;
+      player.items.splice(0, drop);
+      player.index = Math.max(0, player.index - drop);
+    }
+    if (player.status === "done") {
+      player.index++;
+      playCurrent();
+    } else {
+      saveState();
+    }
+    return { ok: true };
+  },
+
+  jump(index) {
+    if (!player.items.length) return;
+    player.index = Math.max(0, Math.min(player.items.length - 1, index));
+    silence();
+    playCurrent();
+  },
+
+  pause() {
+    if (player.status !== "playing") return;
+    silence();
+    player.status = "paused";
+    saveState();
+  },
+
+  resume() {
+    if (!player.items.length) return;
+    if (player.status === "done") player.index = Math.min(player.index, player.items.length - 1);
+    silence();
+    playCurrent(); // restarts the current paragraph
+  },
+
+  stop() {
+    silence();
+    if (player.items.length) player.status = "stopped";
+    saveState();
+  },
+
+  state() {
+    return {
+      id: player.id,
+      status: player.status,
+      index: player.index,
+      live: player.live,
+      texts: player.items.map((i) => i.text),
+    };
+  },
+};
+
+function trimBacklog(backlog) {
+  // waiting = items after the one being read (when done, the current one was already read)
+  const firstWaiting = player.index + 1;
+  const waiting = player.items.length - firstWaiting;
+  if (waiting > backlog) player.items.splice(firstWaiting, waiting - backlog);
+}
+
+// Serialize player operations so chat messages keep their order (item building is async).
 let chain = Promise.resolve();
-function speak(texts, mode, tabId) {
-  const run = chain.then(() => speakNow(texts, mode, tabId));
+function queued(fn) {
+  const run = chain.then(async () => { await restored; return fn(); });
   chain = run.catch(() => {});
   return run;
 }
 
-// Firefox: the top frame of the tab speaks with window.speechSynthesis.
-async function speakInTab(tabId, messages, mode, settings) {
-  if (tabId == null) return { ok: false, error: "No tab to read in." };
-  await injectContent(tabId);
-  await ext.tabs.sendMessage(tabId, { type: "ttsSpeak", messages, mode, settings }, { frameId: 0 });
-  return { ok: true };
-}
-
-function stopSpeech(tabId) {
-  if (HAS_EXT_TTS) engineStop();
-  else if (tabId != null) ext.tabs.sendMessage(tabId, { type: "ttsStop" }, { frameId: 0 }).catch(() => {});
+async function readText(text, tabId) {
+  const { autoLang } = await getSettings();
+  return playerApi.load(await makeItems(text, autoLang, true), tabId);
 }
 
 // ---------- page access ----------
@@ -289,7 +406,7 @@ async function getPageText(tabId) {
 }
 
 async function stopAll(tabId) {
-  stopSpeech(tabId);
+  playerApi.stop();
   if (tabId != null) {
     setWatching(tabId, false);
     ext.tabs.sendMessage(tabId, { type: "stopWatch" }).catch(() => {});
@@ -297,8 +414,7 @@ async function stopAll(tabId) {
   }
 }
 
-// ---------- state for the popup (is something being read / watched?) ----------
-// Kept in storage.session so it survives the background being unloaded.
+// ---------- watched sections (per tab, kept in storage.session) ----------
 
 async function setWatching(tabId, on) {
   const { watchingTabs = [] } = await ext.storage.session.get("watchingTabs");
@@ -312,19 +428,13 @@ async function isWatching(tabId) {
   return watchingTabs.includes(tabId);
 }
 
-async function isSpeaking(tabId) {
-  if (HAS_EXT_TTS) return engine.pending > 0 || (await ext.tts.isSpeaking());
-  if (tabId == null) return false;
-  try {
-    return !!(await ext.tabs.sendMessage(tabId, { type: "ttsState" }, { frameId: 0 }));
-  } catch (_) {
-    return false; // no content script in the tab
-  }
-}
-
-// A reload or navigation removes the watched element.
 ext.tabs.onUpdated.addListener((tabId, info) => {
-  if (info.status === "loading") setWatching(tabId, false).catch(() => {});
+  if (info.status !== "loading") return;
+  setWatching(tabId, false).catch(() => {}); // a reload or navigation removes the watched element
+  // Firefox speaks inside the page, so leaving the page ends the speech.
+  if (!HAS_EXT_TTS && tabId === player.tabId && player.status === "playing") {
+    queued(() => { player.token++; player.status = "stopped"; saveState(); });
+  }
 });
 ext.tabs.onRemoved.addListener((tabId) => setWatching(tabId, false).catch(() => {}));
 
@@ -342,31 +452,57 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "readSelection": {
           const text = await getSelectionText(msg.tabId);
           if (!text.trim()) return sendResponse({ ok: false, empty: true });
-          return sendResponse(await speak([text], "replace", msg.tabId));
+          return sendResponse(await queued(() => readText(text, msg.tabId)));
         }
-        case "readAll":
-          return sendResponse(await speak([await getPageText(msg.tabId)], "replace", msg.tabId));
+        case "readAll": {
+          const text = await getPageText(msg.tabId);
+          return sendResponse(await queued(() => readText(text, msg.tabId)));
+        }
         case "startPick":
-          stopSpeech(msg.tabId);
+          await queued(() => playerApi.stop());
           await setWatching(msg.tabId, false); // starting a new pick stops the old watch
           await injectContent(msg.tabId);
           await ext.tabs.sendMessage(msg.tabId, { type: "startPick", liveOnlyNew: msg.liveOnlyNew });
           return sendResponse({ ok: true });
-        case "getState":
-          return sendResponse({
-            ok: true,
-            speaking: await isSpeaking(msg.tabId),
-            watching: msg.tabId != null && (await isWatching(msg.tabId)),
-          });
         case "picked":
           await setWatching(sender.tab.id, true);
           // a frame picked an element: cancel the picker in all other frames
           ext.tabs.sendMessage(sender.tab.id, { type: "cancelPick" }).catch(() => {});
           return sendResponse({ ok: true });
-        case "speak": // from content script (section reading)
-          return sendResponse(await speak(msg.texts, msg.mode || "queue", sender.tab?.id));
+        case "speak": { // from content script: the picked section
+          const tabId = sender.tab?.id;
+          const { autoLang } = await getSettings();
+          return sendResponse(await queued(async () => {
+            if (msg.mode === "replace") {
+              // whole section once, then new messages are appended (live list)
+              return playerApi.load(await makeItems(msg.texts.join("\n"), autoLang, true), tabId, true);
+            }
+            const items = [];
+            for (const t of msg.texts) items.push(...(await makeItems(t, autoLang, false)));
+            return playerApi.addLive(items, tabId);
+          }));
+        }
+        case "ttsItemEnd": // Firefox: the page finished speaking an item
+          await queued(() => { if (msg.token === player.token) onItemEnd(); });
+          return sendResponse({ ok: true });
+        case "getState":
+          await restored;
+          return sendResponse({
+            ok: true,
+            ...playerApi.state(),
+            watching: msg.tabId != null && (await isWatching(msg.tabId)),
+          });
+        case "pause":
+          await queued(() => playerApi.pause());
+          return sendResponse({ ok: true });
+        case "resume":
+          await queued(() => playerApi.resume());
+          return sendResponse({ ok: true });
+        case "jump":
+          await queued(() => playerApi.jump(msg.index));
+          return sendResponse({ ok: true });
         case "stop":
-          await stopAll(msg.tabId);
+          await queued(() => stopAll(msg.tabId));
           return sendResponse({ ok: true });
         case "pickFrame": // a frame started highlighting: tell the others to hide their picker UI
           ext.tabs.sendMessage(sender.tab.id, { type: "pickFrame", token: msg.token }).catch(() => {});
@@ -394,17 +530,17 @@ if (ext.contextMenus) {
     ext.contextMenus.create({ id: "read-selection", title: "Read selected text aloud", contexts: ["selection"] });
   });
   ext.contextMenus.onClicked.addListener((info, tab) => {
-    if (info.menuItemId === "read-selection") speak([info.selectionText], "replace", tab?.id).catch(() => {});
+    if (info.menuItemId === "read-selection") queued(() => readText(info.selectionText, tab?.id)).catch(() => {});
   });
 }
 
 ext.commands?.onCommand.addListener(async (command) => {
   const tabId = await activeTabId();
-  if (command === "stop-reading") return stopAll(tabId);
+  if (command === "stop-reading") return queued(() => stopAll(tabId));
   if (command === "read-selection" && tabId != null) {
     try {
       const text = await getSelectionText(tabId);
-      if (text.trim()) await speak([text], "replace", tabId);
+      if (text.trim()) await queued(() => readText(text, tabId));
     } catch (_) { /* restricted page */ }
   }
 });

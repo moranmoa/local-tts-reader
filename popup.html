@@ -7,35 +7,59 @@
 </head>
 <body>
   <header>
-    <h1>Local TTS Reader</h1>
+    <div class="title-row">
+      <h1>Local TTS Reader</h1>
+      <button id="gear" class="icon-btn" title="Settings" aria-label="Settings">⚙</button>
+    </div>
     <div id="status" class="status">Checking for selected text…</div>
     <div id="voiceWarning" class="warning" hidden></div>
   </header>
 
-  <div class="buttons">
-    <button id="readAll" class="primary">▶ Read all</button>
-    <button id="readSection">⌖ Read section</button>
+  <!-- main view -->
+  <main id="mainView">
+    <div class="row3">
+      <button id="readAll" class="primary">▶ Read all</button>
+      <button id="stop">■ Stop</button>
+      <button id="pause" disabled>⏸ Pause</button>
+    </div>
+
+    <div class="row2">
+      <button id="readSection">⌖ Read section</button>
+      <label class="check">
+        <input type="checkbox" id="liveOnlyNew" />
+        <span>Section: read only new content (live chat mode)</span>
+      </label>
+    </div>
     <div class="hint section-hint desktop-only">
-      Hover the chat, then press <kbd>↑</kbd> / <kbd>↓</kbd> until the whole chat is highlighted, and click.
+      Hover the chat, press <kbd>↑</kbd> / <kbd>↓</kbd> until the whole chat is highlighted, and click.
     </div>
     <div class="hint section-hint touch-only">
       Tap the chat, then use <b>▲ Parent</b> until the whole chat is highlighted, and tap <b>✓ Read this</b>.
     </div>
-    <button id="stop" class="danger">■ Stop</button>
-  </div>
 
-  <label class="check">
-    <input type="checkbox" id="liveOnlyNew" />
-    Section: read only new content (live chat mode)
-  </label>
+    <section class="now">
+      <div class="now-head">
+        <span class="now-title">Now reading</span>
+        <span id="position" class="position"></span>
+        <button id="prev" class="icon-btn" title="Previous paragraph" aria-label="Previous paragraph" disabled>⏮</button>
+        <button id="next" class="icon-btn" title="Next paragraph" aria-label="Next paragraph" disabled>⏭</button>
+      </div>
+      <div id="nowList" class="now-list" role="list">
+        <div class="now-empty">Nothing is being read. Click a paragraph here to jump to it.</div>
+      </div>
+    </section>
+  </main>
 
-  <section class="settings">
+  <!-- settings view (gear) -->
+  <section id="settingsView" class="settings" hidden>
+    <button id="back" class="back">← Back</button>
+
     <label class="stack">Default voice (local only)
       <select id="voice"></select>
     </label>
     <label class="check">
       <input type="checkbox" id="autoLang" />
-      Auto-detect language (uses an installed voice for it)
+      <span>Auto-detect language (uses an installed voice for it)</span>
     </label>
 
     <div class="slider-row">
@@ -54,9 +78,9 @@
       <output id="backlogValue">5</output>
     </div>
     <div class="hint">Backlog: in a fast chat, read only the last N waiting messages.</div>
-  </section>
 
-  <footer>Tip: select text and click the icon to read it. Alt+Shift+R reads selection, Alt+Shift+X stops.</footer>
+    <footer>Tip: select text and click the icon to read it. Alt+Shift+R reads selection, Alt+Shift+X stops.</footer>
+  </section>
 
   <script src="popup.js"></script>
 </body>

@@ -267,12 +267,11 @@
   }
 
   // ---------------- speech engine (Firefox) ----------------
-  // Chrome speaks from the background with chrome.tts. Firefox has no chrome.tts,
-  // so the top frame speaks with the OS voices through window.speechSynthesis.
+  // Chrome speaks from the background with chrome.tts. Firefox has no chrome.tts, so the
+  // top frame speaks one item at a time with speechSynthesis and reports "ttsItemEnd";
+  // the player in background.js decides what comes next.
 
-  // Mirrors the Chrome engine in background.js: language-matched voice per chunk,
-  // and a live backlog that keeps only the newest `settings.backlog` chat messages.
-  const speech = { pending: 0, generation: 0, liveQueue: [] };
+  const speech = { token: null };
 
   const baseLang = (l) => {
     const b = (l || "").toLowerCase().split(/[-_]/)[0];
@@ -293,44 +292,28 @@
   }
 
   function ttsStop() {
-    speech.generation++;
-    speech.liveQueue = [];
-    speech.pending = 0;
+    speech.token = null;
     speechSynthesis.cancel();
   }
 
-  function ttsSpeakItems(items, settings) {
-    const gen = speech.generation;
-    for (const { text, lang } of items) {
-      const u = new SpeechSynthesisUtterance(text);
-      const voice = pickPageVoice(settings.voiceName, lang, settings.autoLang);
+  function ttsItem({ parts, settings, token }) {
+    speechSynthesis.cancel();
+    speech.token = token;
+    parts.forEach((part, i) => {
+      const u = new SpeechSynthesisUtterance(part.text);
+      const voice = pickPageVoice(settings.voiceName, part.lang, settings.autoLang);
       if (voice) { u.voice = voice; u.lang = voice.lang; }
       u.rate = settings.rate;
       u.volume = settings.volume;
-      u.onend = u.onerror = () => {
-        if (gen !== speech.generation) return;
-        speech.pending = Math.max(0, speech.pending - 1);
-        if (speech.pending === 0) playNextLive();
-      };
-      speech.pending++;
+      if (i === parts.length - 1) {
+        u.onend = u.onerror = () => {
+          if (speech.token !== token) return; // stopped or replaced meanwhile
+          speech.token = null;
+          send({ type: "ttsItemEnd", token });
+        };
+      }
       speechSynthesis.speak(u);
-    }
-  }
-
-  function playNextLive() {
-    const next = speech.liveQueue.shift();
-    if (next) ttsSpeakItems(next.items, next.settings);
-  }
-
-  function ttsSpeak({ messages, mode, settings }) {
-    if (mode === "replace") ttsStop();
-    if (mode === "live") {
-      for (const items of messages) speech.liveQueue.push({ items, settings });
-      speech.liveQueue = speech.liveQueue.slice(-settings.backlog);
-      if (speech.pending === 0) playNextLive();
-    } else {
-      ttsSpeakItems(messages.flat(), settings);
-    }
+    });
   }
 
   // ---------------- messages ----------------
@@ -341,8 +324,7 @@
     else if (msg.type === "pickFrame") onPickFrame(msg.token);
     else if (msg.type === "pickKey") onPickKey(msg.key);
     else if (msg.type === "stopWatch") stopWatch();
-    else if (msg.type === "ttsSpeak" && window === window.top) ttsSpeak(msg);
+    else if (msg.type === "ttsItem" && window === window.top) ttsItem(msg);
     else if (msg.type === "ttsStop" && window === window.top) ttsStop();
-    else if (msg.type === "ttsState" && window === window.top) sendResponse(speech.pending > 0 || speechSynthesis.speaking);
   });
 })();
