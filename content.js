@@ -315,12 +315,13 @@
 
   // ---------------- messages ----------------
 
-  ext.runtime.onMessage.addListener((msg) => {
+  ext.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "startPick") { stopWatch(); startPick(msg.liveOnlyNew !== false); }
     else if (msg.type === "cancelPick") cancelPick();
     else if (msg.type === "pickFrame") onPickFrame(msg.token);
     else if (msg.type === "stopWatch") stopWatch();
     else if (msg.type === "ttsSpeak" && window === window.top) ttsSpeak(msg);
     else if (msg.type === "ttsStop" && window === window.top) ttsStop();
+    else if (msg.type === "ttsState" && window === window.top) sendResponse(speech.pending > 0 || speechSynthesis.speaking);
   });
 })();

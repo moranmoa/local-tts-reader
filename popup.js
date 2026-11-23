@@ -90,6 +90,7 @@ $("autoLang").addEventListener("change", (e) => ext.storage.sync.set({ autoLang:
 
 $("readAll").addEventListener("click", async () => {
   setStatus("Reading page…");
+  setActive(true);
   const res = await send({ type: "readAll", tabId: await getTabId() });
   if (!res?.ok) setStatus(restrictedMessage(res?.error), true);
 });
@@ -103,6 +104,7 @@ $("readSection").addEventListener("click", async () => {
 $("stop").addEventListener("click", async () => {
   await send({ type: "stop", tabId: await getTabId() });
   setStatus("Stopped.");
+  setActive(false);
 });
 
 // ---------- missing voice hint ----------
@@ -125,11 +127,28 @@ ext.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.missingVoice) showVoiceWarning(changes.missingVoice.newValue);
 });
 
+// ---------- active state: Stop becomes the main (pink) button ----------
+
+function setActive(active) {
+  $("stop").classList.toggle("primary", active);
+  $("readAll").classList.toggle("primary", !active);
+}
+
+async function refreshState() {
+  try {
+    const s = await send({ type: "getState", tabId: await getTabId() });
+    setActive(!!(s?.speaking || s?.watching));
+  } catch (_) { /* background busy; try again next tick */ }
+}
+
+refreshState();
+setInterval(refreshState, 1000);
+
 // On open: if text is selected on the page, read it right away.
 (async () => {
   loadSettings(); // don't wait for the voice list before reading the selection
   const res = await send({ type: "readSelection", tabId: await getTabId() });
-  if (res?.ok) setStatus("Reading selected text…");
+  if (res?.ok) { setStatus("Reading selected text…"); setActive(true); }
   else if (res?.empty) setStatus("No text selected.");
   else setStatus(restrictedMessage(res?.error), true);
 })();

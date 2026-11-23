@@ -291,10 +291,42 @@ async function getPageText(tabId) {
 async function stopAll(tabId) {
   stopSpeech(tabId);
   if (tabId != null) {
+    setWatching(tabId, false);
     ext.tabs.sendMessage(tabId, { type: "stopWatch" }).catch(() => {});
     ext.tabs.sendMessage(tabId, { type: "cancelPick" }).catch(() => {});
   }
 }
+
+// ---------- state for the popup (is something being read / watched?) ----------
+// Kept in storage.session so it survives the background being unloaded.
+
+async function setWatching(tabId, on) {
+  const { watchingTabs = [] } = await ext.storage.session.get("watchingTabs");
+  const next = watchingTabs.filter((id) => id !== tabId);
+  if (on) next.push(tabId);
+  await ext.storage.session.set({ watchingTabs: next });
+}
+
+async function isWatching(tabId) {
+  const { watchingTabs = [] } = await ext.storage.session.get("watchingTabs");
+  return watchingTabs.includes(tabId);
+}
+
+async function isSpeaking(tabId) {
+  if (HAS_EXT_TTS) return engine.pending > 0 || (await ext.tts.isSpeaking());
+  if (tabId == null) return false;
+  try {
+    return !!(await ext.tabs.sendMessage(tabId, { type: "ttsState" }, { frameId: 0 }));
+  } catch (_) {
+    return false; // no content script in the tab
+  }
+}
+
+// A reload or navigation removes the watched element.
+ext.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === "loading") setWatching(tabId, false).catch(() => {});
+});
+ext.tabs.onRemoved.addListener((tabId) => setWatching(tabId, false).catch(() => {}));
 
 async function activeTabId() {
   const [tab] = await ext.tabs.query({ active: true, currentWindow: true });
@@ -316,10 +348,18 @@ ext.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return sendResponse(await speak([await getPageText(msg.tabId)], "replace", msg.tabId));
         case "startPick":
           stopSpeech(msg.tabId);
+          await setWatching(msg.tabId, false); // starting a new pick stops the old watch
           await injectContent(msg.tabId);
           await ext.tabs.sendMessage(msg.tabId, { type: "startPick", liveOnlyNew: msg.liveOnlyNew });
           return sendResponse({ ok: true });
+        case "getState":
+          return sendResponse({
+            ok: true,
+            speaking: await isSpeaking(msg.tabId),
+            watching: msg.tabId != null && (await isWatching(msg.tabId)),
+          });
         case "picked":
+          await setWatching(sender.tab.id, true);
           // a frame picked an element: cancel the picker in all other frames
           ext.tabs.sendMessage(sender.tab.id, { type: "cancelPick" }).catch(() => {});
           return sendResponse({ ok: true });
