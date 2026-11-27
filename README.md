@@ -8,8 +8,8 @@ All speech uses **local voices only**. No cloud TTS, no account, and nothing you
 
 ## Install
 
-- **Firefox:** *link coming soon*
-- **Chrome:** *link coming soon*
+- **Firefox** (desktop and Android): [Get it on Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/local-tts-reader/)
+- **Chrome:** *coming soon*
 
 ## Features
 
